@@ -1,0 +1,69 @@
+---
+- name: Set Promtail architecture fact
+  set_fact:
+    promtail_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Create promtail directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0755'
+  loop:
+    - "{{ promtail_config_dir }}"
+    - "/var/log/promtail"
+
+- name: Download Promtail binary
+  get_url:
+    url: "https://github.com/grafana/loki/releases/download/v{{ promtail_version }}/promtail-linux-{{ promtail_arch }}.zip"
+    dest: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    mode: '0644'
+
+- name: Extract Promtail binary
+  unarchive:
+    src: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    dest: "/tmp"
+    remote_src: yes
+
+- name: Install Promtail binary
+  copy:
+    src: "/tmp/promtail-linux-{{ promtail_arch }}"
+    dest: "/usr/local/bin/promtail"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+
+- name: Template Promtail configuration file
+  template:
+    src: promtail-config.yaml.j2
+    dest: "{{ promtail_config_dir }}/promtail-config.yaml"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0644'
+  notify: restart promtail
+
+- name: Create Promtail systemd service file
+  template:
+    src: promtail.service.j2
+    dest: /etc/systemd/system/promtail.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart promtail
+
+- name: Enable and start Promtail service
+  systemd:
+    name: promtail
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    - "/tmp/promtail-linux-{{ promtail_arch }}"

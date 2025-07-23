@@ -1,0 +1,58 @@
+- name: Ensure tar is installed
+  package:
+    name: tar
+    state: present
+    
+- name: Set Corretto JDK variables
+  set_fact:
+    app_dir: /opt/apps
+    architecture_alias: "{{ 'aarch64' if ansible_architecture in ['aarch64', 'arm64'] else 'x64' }}"
+    corretto_jdk:
+      - jdk_version: "17.0.11.9.1"
+        jdk_version_short: "17"
+        java_url: "https://corretto.aws/downloads/resources/17.0.11.9.1/amazon-corretto-17.0.11.9.1-linux-{{ architecture_alias }}.tar.gz"
+
+- name: Ensure Corretto OpenJDK 17 is present
+  stat:
+    path: "/opt/apps/openjdk17/bin/java"
+  register: corretto_openjdk17
+
+- name: Install Corretto OpenJDK 17 if not present
+  when: not corretto_openjdk17.stat.exists
+  block:
+    - name: Download Corretto {{ item.jdk_version_short }} JDK
+      get_url:
+        url: "{{ item.java_url }}"
+        dest: "/tmp/corretto-jdk.tar.gz"
+        mode: '0644'
+        force: no
+      loop: "{{ corretto_jdk }}"
+      loop_control:
+        loop_var: item
+
+    - name: Extract Corretto JDK {{ item.jdk_version_short }} to temporary location
+      unarchive:
+        src: "/tmp/corretto-jdk.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+      args:
+        creates: "/tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}"
+      loop: "{{ corretto_jdk }}"
+      loop_control:
+        loop_var: item
+
+    - name: Move extracted Corretto JDK {{ item.jdk_version_short }} files to final directory
+      shell: |
+        mkdir -p {{ app_dir }}/openjdk{{ item.jdk_version_short }}
+        chmod -R 0755 /tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}
+        mv /tmp/amazon-corretto-{{ item.jdk_version }}-linux-{{architecture_alias}}/* {{ app_dir }}/openjdk{{ item.jdk_version_short }}/
+      args:
+        creates: "{{ app_dir }}/openjdk{{ item.jdk_version_short }}/bin/java"
+      loop: "{{ corretto_jdk }}"
+      loop_control:
+        loop_var: item
+
+    - name: Remove the downloaded tar file
+      file:
+        dest: "/tmp/corretto-jdk.tar.gz"
+        state: absent

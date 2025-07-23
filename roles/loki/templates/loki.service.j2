@@ -1,0 +1,19 @@
+[Unit]
+Description=Loki service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/loki -config.file {{ loki_config_dir }}/loki-config.yaml
+Restart=on-failure
+RestartSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=loki
+KillMode=mixed
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

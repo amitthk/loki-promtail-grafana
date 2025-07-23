@@ -1,0 +1,24 @@
+---
+- name: Install OpenJDK 17 (Corretto) if needed
+  hosts: loki_servers
+  become: yes
+  roles:
+    - role: openjdk
+
+- name: Deploy Loki
+  hosts: loki_servers
+  become: yes
+  roles:
+    - role: loki
+
+- name: Deploy Promtail
+  hosts: promtail_servers
+  become: yes
+  roles:
+    - role: promtail
+
+- name: Deploy Grafana
+  hosts: grafana_servers
+  become: yes
+  roles:
+    - role: grafana

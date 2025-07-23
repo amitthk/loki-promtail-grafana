@@ -1,0 +1,328 @@
+* Lightweight log analytics using Loki and Promtail
+
+In today's fast-paced AI-driven developer environments, understanding and resolving issues in live applications before customers notice them is critical. Log aggregation and analytics provide an efficient way to detect problems early, monitor system performance, and ensure reliable, user-friendly software. Access to logs is centralized and accessible location is much better than outdated methods of manually logging in into servers and searching through logs.
+
+But sometimes, we do not have sufficient resources to run a full ELK stack. In this article, we will explore a lightweight log aggregation solution using Loki. Logs will be shipped to Loki using Promtail, and we can then connect our Grafana instance to Loki to access and analyse logs from centralized dashboard.
+
+[[file:./screenshots/loki-analytics-grafana-dashboard.png][Loki Analytics Dashboard]]
+
+Before we go ahead and setup Loki + Promtail let us look at why this is preferable solution where lightweight analytics solution is required compared to full text indexing solution using the conventional Elasticsearch + Logstash:
+
+| Category                 | Loki + Promtail                                       | Elasticsearch + Logstash                            |
+| Architecture         | Simple and lightweight                                    | Heavier, more complex                                   |
+| Setup & Maintenance  | Easy to deploy, lower ops burden                          | Complex setup, high tuning/maintenance effort           |
+| Log Processing       | Basic label parsing via Promtail                          | Rich parsing, filtering, transformations with Logstash  |
+| Indexing             | Only indexes labels (metadata)                            | Indexes full log content (powerful, but resource-heavy) |
+| Search Capability    | Good for label/time-based queries, regex on content       | Full-text search, fielded queries, aggregations         |
+| Storage Efficiency   | Highly efficient (compressed chunks + minimal index)      | High storage usage due to full-text indexing            |
+| Cost                 | Low CPU/RAM/storage                                       | High CPU, RAM, and disk costs at scale                  |
+| Performance at Scale | Very scalable due to minimal indexing                     | Scales but needs tuning, often limited by disk I/O      |
+| Use Case Fit         | Great for metrics-aligned logs (K8s, apps, microservices) | Ideal for complex log analytics, security, compliance   |
+| Grafana Integration  | Native and seamless                                       | Needs plugin or proxy setup                             |
+
+
+Now let us look at how to setup Loki + Promtail + Grafana on our server(s). This ansible playbook contains the roles which can be used to install Loki, Promtail, and Grafana on your server. Usually we would have Promtail running on multiple servers to collect logs and send them to a central Loki instance. Loki and Grafana will be installed on dedicated instances only and not everywhere.  Grafana is then used to visualize and analyze these logs.
+
+# Setting up the Loki:
+
+The Loki role sets up the Loki log aggregation server. This role will create the necessary user and group for Loki, sets up all required directories, and downloads the correct Loki binary for your server's architecture. It then installs Loki, creates a configuration file using your settings, and sets up a system service so Loki starts automatically. After installation, Loki is ready to receive and store logs efficiently.
+
+#+BEGIN_SRC 
+---
+---
+- name: Set Loki architecture fact
+  set_fact:
+    loki_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Ensure unzip is installed
+  package:
+    name: unzip
+    state: present
+
+
+- name: Create loki group
+  group:
+    name: "{{ loki_group }}"
+    state: present
+
+- name: Create loki user
+  user:
+    name: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    system: yes
+    shell: /bin/false
+    home: "{{ loki_data_dir }}"
+    createhome: no
+    state: present
+
+- name: Create loki directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0755'
+  loop:
+    - "{{ loki_data_dir }}"
+    - "{{ loki_data_dir }}/chunks"
+    - "{{ loki_data_dir }}/index"
+    - "{{ loki_data_dir }}/cache"
+    - "{{ loki_data_dir }}/compactor"
+    - "{{ loki_config_dir }}"
+    - "/var/log/loki"
+
+- name: Download Loki binary
+  get_url:
+    url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-{{ loki_arch }}.zip"
+    dest: "/tmp/loki-linux-{{ loki_arch }}.zip"
+    mode: '0644'
+
+- name: Extract Loki binary
+  unarchive:
+    src: "/tmp/loki-linux-{{ loki_arch }}.zip"
+    dest: "/tmp"
+    remote_src: yes
+
+- name: Install Loki binary
+  copy:
+    src: "/tmp/loki-linux-{{ loki_arch }}"
+    dest: "/usr/local/bin/loki"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+
+- name: Template Loki configuration file
+  template:
+    src: loki-config.yaml.j2
+    dest: "{{ loki_config_dir }}/loki-config.yaml"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0644'
+  notify: restart loki
+
+- name: Create Loki systemd service file
+  template:
+    src: loki.service.j2
+    dest: /etc/systemd/system/loki.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart loki
+
+- name: Enable and start Loki service
+  systemd:
+    name: loki
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/loki-linux-{{ loki_arch }}.zip"
+    - "/tmp/loki-linux-{{ loki_arch }}"
+
+#+END_SRC
+
+# Sending the logs using pomtail
+
+The Promtail role installs Promtail, which is the agent that collects logs from your server and sends them to Loki. Promtail should be installed at all the systems from which we need to send the data to Loki. This role creates the required directories, downloads the correct Promtail binary for your server's architecture, and installs it. The role also sets up Promtail as a system service so it runs in the background and starts automatically with your server. 
+
+Promtail's configuration should be setup based on your log paths and preferences. Please note that the promtail service here is running as root since I needed to send systemd logs. In production envionment we should be granting respective read permissions to appropriate user and group to be able to read and dispatch the logs.
+
+#+BEGIN_SRC 
+---
+---
+- name: Set Promtail architecture fact
+  set_fact:
+    promtail_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Create promtail directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0755'
+  loop:
+    - "{{ promtail_config_dir }}"
+    - "/var/log/promtail"
+
+- name: Download Promtail binary
+  get_url:
+    url: "https://github.com/grafana/loki/releases/download/v{{ promtail_version }}/promtail-linux-{{ promtail_arch }}.zip"
+    dest: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    mode: '0644'
+
+- name: Extract Promtail binary
+  unarchive:
+    src: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    dest: "/tmp"
+    remote_src: yes
+
+- name: Install Promtail binary
+  copy:
+    src: "/tmp/promtail-linux-{{ promtail_arch }}"
+    dest: "/usr/local/bin/promtail"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+
+- name: Template Promtail configuration file
+  template:
+    src: promtail-config.yaml.j2
+    dest: "{{ promtail_config_dir }}/promtail-config.yaml"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0644'
+  notify: restart promtail
+
+- name: Create Promtail systemd service file
+  template:
+    src: promtail.service.j2
+    dest: /etc/systemd/system/promtail.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart promtail
+
+- name: Enable and start Promtail service
+  systemd:
+    name: promtail
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+    - "/tmp/promtail-linux-{{ promtail_arch }}"
+
+#+END_SRC
+
+
+What will be interesting here is to look at the promtail configuration file. The first job in this config named journal-services sends the journald logs for specified services. The second job named service-log-files is sending the service specific logs from the /var/log/ sub-directories. This can be directed specifically to the application wherever it is publishing the logs.
+
+#+BEGIN_SRC 
+server:
+  http_listen_port: {{ promtail_service_port }}
+  grpc_listen_port: 0
+positions:
+  filename: /tmp/positions.yaml
+clients:
+  - url: http://{{ ansible_default_ipv4.address }}:{{ loki_service_port }}/loki/api/v1/push
+
+scrape_configs:
+  # Primary method: Systemd journal for specific services
+  - job_name: journal-services
+    journal:
+      # Max age of logs to read on start-up. Prevents sending very old logs.
+      max_age: 24h
+      # The path to the journal is usually auto-detected.
+      # path: /var/log/journal
+      labels:
+        job: systemd-journal
+    relabel_configs:
+      # Create a 'unit' label from the systemd unit name
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+
+      # Only keep logs from the specified services
+      - source_labels: ['__journal__systemd_unit']
+        regex: '(backend|discovery-service)\.service'
+        action: keep
+
+      # Optional: Only keep logs with error priority (0=EMERG to 3=ERR)
+      # Uncomment this block if you only want errors.
+      # - source_labels: ['__journal_priority']
+      #   regex: '[0-3]'
+      #   action: keep
+      
+      # Add hostname as a label
+      - source_labels: ['__journal__hostname']
+        target_label: 'hostname'
+
+  # Backup method: Monitor service log files directly
+  - job_name: service-log-files
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          __path__: /var/log/{backend,discovery-service}*.log
+    # The pipeline_stages must be at the same indentation level as static_configs
+    pipeline_stages:
+      - regex:
+          # Extract service name from the filename to create a 'service' label
+          expression: '^/var/log/(?P<service>[^/]+?)(-\d{4}-\d{2}-\d{2})?\.log$'
+      - labels:
+          service:
+#+END_SRC
+
+# Visualizing the analytics using Grafana
+
+The Grafana role installs Grafana, which is the web interface for viewing and analyzing your logs. It ensures all dependencies are installed, downloads the correct Grafana package for your server's architecture, and installs it. Grafana is then enabled as a system service so you can access it through your web browser. Once Grafana is running, you can connect it to Loki and start building dashboards and visualizing your logs.
+
+
+
+#+BEGIN_SRC 
+---
+- name: Set Grafana architecture fact
+  set_fact:
+    grafana_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Ensure tar is installed
+  package:
+    name: tar
+    state: present
+
+- name: Ensure /opt/apps/grafana directory exists
+  file:
+    path: /opt/apps/grafana
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download Grafana tarball
+  get_url:
+    url: "https://dl.grafana.com/oss/release/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    dest: "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    mode: '0644'
+
+- name: Extract Grafana tarball
+  unarchive:
+    src: "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    dest: /opt/apps/grafana
+    remote_src: yes
+    extra_opts: [--strip-components=1]
+
+- name: Create Grafana systemd service file
+  template:
+    src: grafana-server.service.j2
+    dest: /etc/systemd/system/grafana-server.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart grafana
+
+- name: Enable and start Grafana service
+  systemd:
+    name: grafana-server
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"

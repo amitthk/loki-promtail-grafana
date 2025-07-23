@@ -1,0 +1,95 @@
+---
+- name: Set Loki architecture fact
+  set_fact:
+    loki_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Ensure unzip is installed
+  package:
+    name: unzip
+    state: present
+
+
+- name: Create loki group
+  group:
+    name: "{{ loki_group }}"
+    state: present
+
+- name: Create loki user
+  user:
+    name: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    system: yes
+    shell: /bin/false
+    home: "{{ loki_data_dir }}"
+    createhome: no
+    state: present
+
+- name: Create loki directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0755'
+  loop:
+    - "{{ loki_data_dir }}"
+    - "{{ loki_data_dir }}/chunks"
+    - "{{ loki_data_dir }}/index"
+    - "{{ loki_data_dir }}/cache"
+    - "{{ loki_data_dir }}/compactor"
+    - "{{ loki_config_dir }}"
+    - "/var/log/loki"
+
+- name: Download Loki binary
+  get_url:
+    url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-{{ loki_arch }}.zip"
+    dest: "/tmp/loki-linux-{{ loki_arch }}.zip"
+    mode: '0644'
+
+- name: Extract Loki binary
+  unarchive:
+    src: "/tmp/loki-linux-{{ loki_arch }}.zip"
+    dest: "/tmp"
+    remote_src: yes
+
+- name: Install Loki binary
+  copy:
+    src: "/tmp/loki-linux-{{ loki_arch }}"
+    dest: "/usr/local/bin/loki"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+
+- name: Template Loki configuration file
+  template:
+    src: loki-config.yaml.j2
+    dest: "{{ loki_config_dir }}/loki-config.yaml"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0644'
+  notify: restart loki
+
+- name: Create Loki systemd service file
+  template:
+    src: loki.service.j2
+    dest: /etc/systemd/system/loki.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart loki
+
+- name: Enable and start Loki service
+  systemd:
+    name: loki
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/loki-linux-{{ loki_arch }}.zip"
+    - "/tmp/loki-linux-{{ loki_arch }}"

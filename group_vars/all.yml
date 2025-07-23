@@ -1,0 +1,35 @@
+---
+architecture: "amd64" # Set to "amd64" or "arm64"
+architecture_alias: "x64" # Set to "x68" or "aarch64" as per architecture
+
+
+loki_version: "3.4.5"
+promtail_version: "3.4.5"
+
+loki_user: "loki"
+loki_group: "loki"
+
+loki_data_dir: "/opt/apps/loki"
+loki_config_dir: "/etc/loki"
+promtail_config_dir: "/etc/promtail"
+
+loki_service_port: 3100
+promtail_service_port: 9080
+
+log_paths:
+  - path: "/var/log/syslog"
+    job: "system-logs"
+  - path: "/var/log/myapp/app.log"
+    job: "myapp-errors"
+    filter_errors: true
+  - path: "/var/log/nginx/access.log"
+    job: "nginx-access"
+  - path: "/var/log/nginx/error.log"
+    job: "nginx-error"
+    filter_errors: true
+
+loki_retention_period: "168h"  # 7 days
+
+alertmanager_url: "http://localhost:9093"
+
+grafana_version: "11.6.3"

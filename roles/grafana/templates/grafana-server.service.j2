@@ -1,0 +1,16 @@
+[Unit]
+Description=Grafana server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/apps/grafana
+Environment="JAVA_HOME=/opt/apps/openjdk17"
+ExecStart=/opt/apps/grafana/bin/grafana-server --homepath=/opt/apps/grafana
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

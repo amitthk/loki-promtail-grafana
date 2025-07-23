@@ -1,0 +1,53 @@
+---
+- name: Set Grafana architecture fact
+  set_fact:
+    grafana_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+
+- name: Ensure tar is installed
+  package:
+    name: tar
+    state: present
+
+- name: Ensure /opt/apps/grafana directory exists
+  file:
+    path: /opt/apps/grafana
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download Grafana tarball
+  get_url:
+    url: "https://dl.grafana.com/oss/release/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    dest: "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    mode: '0644'
+
+- name: Extract Grafana tarball
+  unarchive:
+    src: "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"
+    dest: /opt/apps/grafana
+    remote_src: yes
+    extra_opts: [--strip-components=1]
+
+- name: Create Grafana systemd service file
+  template:
+    src: grafana-server.service.j2
+    dest: /etc/systemd/system/grafana-server.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart grafana
+
+- name: Enable and start Grafana service
+  systemd:
+    name: grafana-server
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/grafana-{{ grafana_version }}.linux-{{ grafana_arch }}.tar.gz"

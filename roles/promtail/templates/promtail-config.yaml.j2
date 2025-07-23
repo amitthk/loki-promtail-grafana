@@ -1,0 +1,53 @@
+server:
+  http_listen_port: {{ promtail_service_port }}
+  grpc_listen_port: 0
+positions:
+  filename: /tmp/positions.yaml
+clients:
+  - url: http://{{ ansible_default_ipv4.address }}:{{ loki_service_port }}/loki/api/v1/push
+
+scrape_configs:
+  # Primary method: Systemd journal for specific services
+  - job_name: journal-services
+    journal:
+      # Max age of logs to read on start-up. Prevents sending very old logs.
+      max_age: 24h
+      # The path to the journal is usually auto-detected.
+      # path: /var/log/journal
+      labels:
+        job: systemd-journal
+    relabel_configs:
+      # Create a 'unit' label from the systemd unit name
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+
+      # Only keep logs from the specified services
+      - source_labels: ['__journal__systemd_unit']
+        regex: '(backend|discovery-service)\.service'
+        action: keep
+
+      # Optional: Only keep logs with error priority (0=EMERG to 3=ERR)
+      # Uncomment this block if you only want errors.
+      # - source_labels: ['__journal_priority']
+      #   regex: '[0-3]'
+      #   action: keep
+      
+      # Add hostname as a label
+      - source_labels: ['__journal__hostname']
+        target_label: 'hostname'
+
+  # Backup method: Monitor service log files directly
+  - job_name: service-log-files
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          __path__: /var/log/{backend,discovery-service}*.log
+    # The pipeline_stages must be at the same indentation level as static_configs
+    pipeline_stages:
+      - regex:
+          # Extract service name from the filename to create a 'service' label
+          expression: '^/var/log/(?P<service>[^/]+?)(-\d{4}-\d{2}-\d{2})?\.log$'
+      - labels:
+          service:
